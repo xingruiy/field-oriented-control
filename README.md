@@ -18,18 +18,20 @@ Tested on:
 ## Layout
 
 ```
-rtl/foc/    foc_pkg, clarke, park, inv_park, pi_controller, svpwm,
-            foc_core, foc_top, clk_rst_gen
-rtl/hall/   hall_decode, hall_angle_est (12-entry calibrated edge table)
-rtl/pwm/    pwm_gen (center-aligned, dead-time, cnt_peak ADC trigger)
-rtl/spi/    drv8316_spi (config + readback-verify + fault poll)
-rtl/math/   sincos_lut (+ sincos_lut.mem from scripts/gen_sincos_lut.py)
-rtl/adc/    xadc_iface (raw XADC, dual S/H), current_offset_cal
-rtl/uart/   uart_rx, uart_tx, cmd_telemetry (framed protocol + watchdog)
-sim/        one self-checking tb_<module>.sv per module + bldc_plant
-scripts/    simulate.sh (xsim), regress.sh, gen_sincos_lut.py
-tcl/        build.tcl (non-project synth->bitstream), program.tcl
-xdc/        arty_s7.xdc
+.
+├── rtl/
+│   ├── foc/    foc_pkg, clarke, park, inv_park, pi_controller, svpwm,
+│   │           foc_core, foc_top, clk_rst_gen
+│   ├── hall/   hall_decode, hall_angle_est (12-entry calibrated edge table)
+│   ├── pwm/    pwm_gen (center-aligned, dead-time, cnt_peak ADC trigger)
+│   ├── spi/    drv8316_spi (config + readback-verify + fault poll)
+│   ├── math/   sincos_lut (+ sincos_lut.mem from scripts/gen_sincos_lut.py)
+│   ├── adc/    xadc_iface (raw XADC, dual S/H), current_offset_cal
+│   └── uart/   uart_rx, uart_tx, cmd_telemetry (framed protocol + watchdog)
+├── sim/        one self-checking tb_<module>.sv per module + bldc_plant
+├── scripts/    simulate.sh (xsim), regress.sh, gen_sincos_lut.py
+├── tcl/        build.tcl (non-project synth->bitstream), program.tcl
+└── xdc/        arty_s7.xdc
 ```
 
 ## Simulate (Vivado xsim only)
@@ -100,6 +102,7 @@ the part database; confirm they are exposed on the board's analog header
 
 ## Docs
 
++ [Operating-Point Config](docs/motor.md)
 + [PWM Generation](docs/pwm.md), 
 + [Hall Decoding](docs/hall.md)
 + [FOC Control](docs/foc.md)
