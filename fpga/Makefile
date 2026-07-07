@@ -11,9 +11,10 @@
 TOP     ?= tb_foc_pkg          # default testbench for `sim` / `gui`
 SCRIPTS := scripts
 TCL     := tcl
+VIVADO_WORK := build/vivado
 
 .DEFAULT_GOAL := help
-.PHONY: help sim gui regress test lut build bitstream program clean distclean
+.PHONY: help sim gui regress test lut build bitstream program flash clean distclean
 
 help: ## Show this help
 	@echo "foc-base make targets (override TOP=tb_<module> where relevant):"
@@ -40,15 +41,19 @@ lut: ## Regenerate rtl/math/sincos_lut.mem
 	python3 $(SCRIPTS)/gen_sincos_lut.py
 
 build: ## Synthesize + implement -> build/impl/foc_top.bit
-	vivado -mode batch -source $(TCL)/build.tcl
+	mkdir -p $(VIVADO_WORK)
+	cd $(VIVADO_WORK) && vivado -mode batch -source $(CURDIR)/$(TCL)/build.tcl
 
 bitstream: build ## Alias for build
 
 program: ## Program the Arty S7-50 over USB-JTAG
-	vivado -mode batch -source $(TCL)/program.tcl
+	mkdir -p $(VIVADO_WORK)
+	cd $(VIVADO_WORK) && vivado -mode batch -source $(CURDIR)/$(TCL)/program.tcl
+
+flash: build program ## Build bitstream, then program the Arty S7-50
 
 clean: ## Remove sim artifacts (keeps build/impl bitstream)
-	rm -rf build/sim xsim.dir xvlog.log xvlog.pb *.jou *.log *.pb .Xil
+	rm -rf build/sim build/vivado xsim.dir xvlog.log xvlog.pb *.jou *.log *.pb .Xil
 
 distclean: clean ## clean + remove synth/impl output (build/impl)
 	rm -rf build/impl

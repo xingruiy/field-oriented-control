@@ -45,8 +45,8 @@ scripts/regress.sh                         # all 20 TBs
 ## Build / program
 
 ```sh
-vivado -mode batch -source tcl/build.tcl     # -> build/impl/foc_top.bit
-vivado -mode batch -source tcl/program.tcl
+make build
+make program
 ```
 
 ## Host UART protocol (115200 8N1)
