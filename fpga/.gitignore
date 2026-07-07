@@ -1,0 +1,94 @@
+# ==========================================
+# Comprehensive Verilog & SystemVerilog Gitignore
+# ==========================================
+
+# Hardware Description Source Code (TRACKED - Do not ignore)
+# .v, .sv, .vh, .svh
+
+# --- Simulation Outputs & Waveforms ---
+*.vcd
+*.wdb
+*.wcfg
+*.fsdb
+*.shm/
+*.key
+*.pb
+*.vpd
+*.log
+*.history
+*.rc
+*.conf
+
+# --- ModelSim / QuestaSim ---
+work/
+transcript
+vsim.wlf
+*.mpf
+*.ini
+_vti*/
+
+# --- Icarus Verilog & GtkWave ---
+*.out
+a.out
+*.gtkw
+
+# --- Verilator ---
+obj_dir/
+*.d
+*.dat
+
+# --- Synopsys (VCS / Design Compiler) ---
+csrc/
+simv
+simv.daidir/
+simv.vdb/
+ucli.key
+vcs.log
+*.vdb
+AN.obj/
+synopsys_sim.setup
+
+# --- Cadence (Xcelium / NC-Sim) ---
+INCA_libs/
+xcelium.d/
+waves.shm/
+xrun.log
+xrun.history
+
+# --- AMD Xilinx Vivado ---
+# For deeply integrated Vivado flows, check the official community template:
+# https://github.com/github/gitignore/blob/main/community/Xilinx.gitignore
+*.jou
+vivado*.log
+vivado*.str
+.Xil/
+hd_visual/
+*.bit
+*.dcp
+*.rpt
+*.wdb
+*.wcfg
+*.ltx
+*.mmi
+*.mcs
+*.runs/
+*.cache/
+*.hw/
+*.ip_user_files/
+*.backup.v
+*.backup.sv
+
+# --- Intel Quartus Prime ---
+db/
+incremental_db/
+simulation/
+timing/
+hc_output/
+*.qws
+*.rpt
+*.summary
+*.smsg
+xsim.dir
+dfx_runtime.txt
+.Xil
+build/

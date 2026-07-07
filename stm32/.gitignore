@@ -1,0 +1,101 @@
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Settings
+.settings/
+.vscode/
+.idea/
+
+# Metadata
+.metadata/
+
+# Build directories
+Debug/
+debug/
+Release/
+release/
+build/
+cmake-build-*/
+
+# CMake/Ninja generated files
+CMakeFiles/
+CMakeCache.txt
+CMakeUserPresets.json
+compile_commands.json
+cmake_install.cmake
+install_manifest.txt
+.ninja_deps
+.ninja_log
+build.ninja
+rules.ninja
+
+# Prerequisites
+*.d
+*.dep
+
+# Object files
+*.o
+*.ko
+*.obj
+*.elf
+*.axf
+*.lst
+*.list
+
+# Linker output
+*.ilk
+*.map
+*.exp
+
+# Libraries
+*.lib
+*.a
+*.la
+*.lo
+
+# Shared objects
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+*.bin
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+*.gcda
+*.gcno
+*.gcov
+
+# Python tooling
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Logs and temporary files
+*.log
+*.tmp

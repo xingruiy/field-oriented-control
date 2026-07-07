@@ -1,0 +1,2 @@
+python-can>=4.0
+# PyQt5 and matplotlib are expected to be already installed system-wide.
