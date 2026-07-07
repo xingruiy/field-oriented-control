@@ -1,0 +1,12 @@
+# build / simulation artifacts
+build/
+xsim.dir/
+*.jou
+*.log
+*.pb
+*.wdb
+.Xil/
+
+# python
+__pycache__/
+*.pyc

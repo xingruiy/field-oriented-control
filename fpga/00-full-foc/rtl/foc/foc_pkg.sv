@@ -203,23 +203,23 @@ package foc_pkg;
   // Hall calibration table (compile-time) + lookups
   //
   //  Per-sector electrical-angle CENTERS, measured on this unit and ported
-  //  from the field-tested STM32 (../stm32/foc/hall.c s_sector_angle[]).
   //  Sector index is the hall_decode output (001->0 011->1 010->2 110->3
   //  100->4 101->5); forward (dir=1) = increasing angle. To recalibrate,
   //  edit these constants and rebuild (no runtime write path). The live
   //  `hall` UART command prints the observer's measured crossings for a
-  //  sanity check; an open-loop measuring sweep (STM32 `hcal`) is future work.
+  //  sanity check; re-run STM32 `hcal`, paste the results into settings.h,
+  //  then update these derived 16-bit angle codes.
   //
   //    sector : hall : STM32 state : angle      : code
-  //      0      001       1          183.4 deg    33387
-  //      1      011       3          245.0 deg    44601
-  //      2      010       2          305.0 deg    55524
-  //      3      110       6          357.7 deg    65117
-  //      4      100       4           50.0 deg     9102
-  //      5      101       5          118.2 deg    21518
+  //      0      001       1          301.7 deg    54923
+  //      1      011       3          359.7 deg    65481
+  //      2      010       2           56.5 deg    10286
+  //      3      110       6          118.4 deg    21554
+  //      4      100       4          181.3 deg    33005
+  //      5      101       5          242.3 deg    44109
   // ------------------------------------------------------------------
-  parameter angle_t HALL_CENTER [6] = '{16'd33387, 16'd44601, 16'd55524,
-                                        16'd65117, 16'd9102,  16'd21518};
+  parameter angle_t HALL_CENTER [6] = '{16'd54923, 16'd65481, 16'd10286,
+                                        16'd21554, 16'd33005, 16'd44109};
 
   function automatic logic [2:0] sec_inc(input logic [2:0] s);
     return (s == 3'd5) ? 3'd0 : s + 3'd1;

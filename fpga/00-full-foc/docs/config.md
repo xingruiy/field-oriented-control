@@ -3,8 +3,8 @@
 Every tunable that ties the RTL to *this* motor and *this* driver lives in
 one of two places: compile-time parameters in
 [`rtl/foc/foc_pkg.sv`](../rtl/foc/foc_pkg.sv) (the locked operating point)
-and run-time values pushed over UART (gains, hall table, references). This
-document is the reference for both. Rationale and datasheet derivations are
+and run-time values pushed over UART (gains and references). This document
+is the reference for both. Rationale and datasheet derivations are
 in [`docs/hardware.md`](hardware.md); the control math is in
 [`docs/foc.md`](foc.md).
 
@@ -76,7 +76,7 @@ reset — reload after every power cycle or fold into a host init script.
 | `iq_ref`  | `iq <int16>`     | Q1.15 (1.0 = 1.25 A) | 0    | Torque-producing current setpoint. |
 | `kp`      | `kp <uint16>`    | Q4.12             | 170 (≈0.0415) | PI proportional gain. |
 | `ki`      | `ki <uint16>`    | Q4.12             | 26 (≈0.0063) | PI integral gain, T_s already folded in. |
-| hall table| `hall <idx> <ang>` | idx 0–11, angle 0–65535 | 60° grid | Per-edge calibrated angle table. |
+| hall diag | `hall`           | no args            | read-only | Prints live observed Hall edge crossings. |
 
 ### PI gains
 
@@ -89,13 +89,28 @@ runs warm (bench-measured R_s ≈ 2.83 Ω with leads), `ki 47` matches better.
 
 ### Hall calibration table
 
-12 entries: indices 0–5 are the angle *entering* each sector moving
-forward, 6–11 the same in reverse. The reset default is the identity
-60-degree grid (`E0..E5` = 0, 10923, 21845, 32768, 43691, 54613). Because
-**pole pairs = 1**, hall placement error maps 1:1 into electrical angle, so
-this table absorbs the physical hall mounting offset of the specific motor.
-Measure the real edge angles and write them with `hall <idx> <ang>` after
-mounting.
+The FPGA uses the calibrated per-state Hall centers from the STM32 config as
+the source of truth: `../stm32/src/common/settings.h`
+`HALL_SECTOR_ANGLE_INIT`. Those radians are converted to 16-bit electrical
+angle codes and baked into `foc_pkg.sv` as `HALL_CENTER`, ordered by the
+FPGA sector mapping `001, 011, 010, 110, 100, 101`.
+
+Current derived defaults:
+
+| FPGA sector | Hall code | STM32 state | Center |
+|-------------|-----------|-------------|--------|
+| 0 | `001` | 1 | 54923 (301.7°) |
+| 1 | `011` | 3 | 65481 (359.7°) |
+| 2 | `010` | 2 | 10286 (56.5°) |
+| 3 | `110` | 6 | 21554 (118.4°) |
+| 4 | `100` | 4 | 33005 (181.3°) |
+| 5 | `101` | 5 | 44109 (242.3°) |
+
+Because **pole pairs = 1**, hall placement error maps 1:1 into electrical
+angle. Re-run STM32 `hcal` after rewiring or swapping motors, paste its
+results into `settings.h`, then regenerate these codes and rebuild the FPGA.
+The FPGA `hall` UART command is a read-only sanity check; it does not update
+the calibration table.
 
 ---
 
@@ -109,4 +124,5 @@ mounting.
 4. If pole pairs ≠ 1, the hall→electrical-angle mapping in
    [`rtl/hall/hall_angle_est.sv`](../rtl/hall/hall_angle_est.sv) changes —
    the absolute-over-one-revolution assumption no longer holds.
-5. Re-measure and re-load the hall calibration table.
+5. Re-run STM32 `hcal`, update `settings.h`, and port the derived Hall
+   center codes into `foc_pkg.sv`.

@@ -82,7 +82,7 @@ module tb_hall_angle_est;
                                      3'b110, 3'b100, 3'b101};
   int b [6]; // physical boundary angles: edge entering sector i (forward)
 
-  real th_ref = 33387.0; // start at baked sector-0 center (HALL_CENTER[0])
+  real th_ref = 0.0;     // set to baked sector-0 center at test start
   real om_ref = 0.0;     // codes per clk, signed
 
   // bounce injection override
@@ -239,6 +239,7 @@ module tb_hall_angle_est;
   initial begin
     // matched: emulator drives the baked forward boundaries
     set_baked_b();
+    th_ref = HALL_CENTER[0];
 
     repeat (3) @(negedge clk);
     rst_n = 1;

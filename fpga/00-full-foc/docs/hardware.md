@@ -14,7 +14,7 @@ Stack: **Arty S7-50** (XC7A50T-1FGG676C) + **DRV8316REVM** (24 V) +
 
 | Fact | Value | Consequence |
 |---|---|---|
-| Pole pairs | **1** | θ_elec = θ_mech; halls are absolute over the full mechanical rev. **But** hall placement error maps 1:1 into electrical angle → calibrate a **per-edge angle table** (12 entries, direction-dependent), not a single offset. |
+| Pole pairs | **1** | θ_elec = θ_mech; halls are absolute over the full mechanical rev. **But** hall placement error maps 1:1 into electrical angle → use calibrated per-state Hall centers from the STM32 config, not a single offset. |
 | Inductance | 0.253 mH **line-to-line** (per-phase L_s = 127 µH) | Very low. At 24 V / 80 kHz / D = 0.5 the two-phase conduction loop (2·L_s = 254 µH) gives **~0.30 A p-p ripple ≈ 1.4× rated current.** Mitigate with bench-supply current limit, low-modulation early tests, and OCP headroom budgeting. |
 | Resistance | 3.16 Ω ±10% **line-to-line** (per-phase R_s = 1.58 Ω) | τ_e = L_s/R_s ≈ 80 µs. With T_s = 12.5 µs and one period transport delay, delay ≈ τ_e/6 — include in PI tuning. The dq control math uses the **per-phase** values (`docs/foc.md` §5). |
 | Torque constant | 14.85 mNm/A | Telemetry sanity scaling. |
@@ -89,9 +89,10 @@ bound for every step — not a reduced bus voltage.
    readback; confirm nFAULT high.
 3. **Offset cal** with gates enabled at 50/50/50 duty (near-zero average
    current, realistic switching common-mode), ≥64-sample average.
-4. **Per-edge hall calibration.** Open-loop low-current vector swept
-   slowly through 360° both directions; record commanded θ at each of the
-   12 transitions; load the edge table over UART (`hall <idx> <ang>`).
+4. **Hall calibration.** Use the STM32 `hcal` open-loop sweep as the
+   source of truth; paste its per-state centers into
+   `../stm32/src/common/settings.h`, then port the derived 16-bit center
+   codes into the FPGA `HALL_CENTER` table.
 5. **Open-loop V/f spin** at low modulation: validate dead-time on scope,
    `cnt_peak` sampling, current reconstruction (ia+ib+ic ≈ 0 residual in
    telemetry); confirm measured ripple ≈ 0.30 A p-p.

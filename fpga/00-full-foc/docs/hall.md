@@ -49,35 +49,36 @@ direction detection cheap.
 5. `edge_strobe` pulses for one clock per accepted legal sector change —
    the only event the estimator listens to.
 
-## 3. Why a 12-entry calibrated edge table
+## 3. Why calibrated Hall centers
 
 With $N_p = 1$, Hall **placement error maps 1:1 into electrical angle**.
 A ±5° mechanical placement tolerance would be a ±5° electrical angle
 error — a 0.4 % torque loss is not the issue; the d/q cross-coupling it
 creates is. A single global offset cannot fix it because each of the six
-sensor edges has its *own* error.
+Hall states has its *own* center error.
 
 Additionally the *physical* switching point of a Hall sensor differs
 between approach directions (magnetic hysteresis), so the angle at which
 the system *enters* sector s moving forward is not the angle at which it
 enters s moving in reverse.
 
-Hence: **12 calibration entries** = 6 forward-entering + 6
-reverse-entering edge angles, loadable at runtime over UART (command
-0x05) and defaulting to the ideal 60° grid:
+The FPGA stores **6 calibrated sector centers** in `foc_pkg::HALL_CENTER`.
+The source of truth is the STM32 project config:
+`../stm32/src/common/settings.h` `HALL_SECTOR_ANGLE_INIT`. The FPGA derives
+the direction-specific boundary crossed at an edge as the circular midpoint
+between adjacent centers:
 
-| index | meaning | identity default (angle codes) |
-|---|---|---|
-| s (0…5) | angle of the edge *entering* sector s, forward | 0, 10923, 21845, 32768, 43691, 54613 |
-| 6+s | angle of the edge *entering* sector s, reverse | 10923, 21845, 32768, 43691, 54613, 0 |
+| edge direction | boundary used |
+|---|---|
+| forward, entering sector s | midpoint of centers s-1 and s |
+| reverse, entering sector s | midpoint of centers s and s+1 |
 
-(the reverse entry for sector s is its *upper* boundary — entering from
-above). Angles are `angle_t`: unsigned 16 bit, full circle = $2^{16}$
-codes, so all subtractions below wrap correctly for free.
-
-The calibration procedure (Phase 6.4) drives the motor open-loop with a
-slow low-current rotating vector, records the commanded θ at each of the
-12 transitions, and writes them back over UART.
+Angles are `angle_t`: unsigned 16 bit, full circle = $2^{16}$ codes, so all
+subtractions below wrap correctly for free. The STM32 `hcal` procedure
+drives the motor open-loop with a slow low-current rotating vector, computes
+the calibrated per-state centers, and prints values to paste into
+`settings.h`; the FPGA values are then regenerated from that config and
+rebuilt. The FPGA `hall` UART command is read-only diagnostic output.
 
 ## 4. `hall_angle_est` — the PLL observer
 
@@ -94,7 +95,7 @@ $$\text{per accepted edge:} \quad
 with $K_P = K_W = 0.3$ (Q0.16 constants `PLL_KP_Q16`/`PLL_KW_Q16`,
 compile-time — the STM32 shipped 0.3/0.3 untouched; a runtime `pllk`
 command is a noted extension point). $\theta_{bnd}$ is the crossed
-boundary's angle from the 12-entry table. `wrap()` is free: the signed
+boundary's angle derived from the calibrated center table. `wrap()` is free: the signed
 16-bit difference of two angle codes is exactly the ±180° wrap.
 
 Soft correction is what makes the observer robust where snapping is not:
@@ -182,7 +183,7 @@ motor's speed ceiling.
 | speed quantization | 1/t_cnt relative; < 0.1 % above 100 rpm |
 | tick staircase | ≤ ω · 1 period; invisible to per-period consumers |
 | correction timing skew | ≈ ω · ½ period systematic (≤ 0.6° at ceiling) |
-| placement / hysteresis | 0.3-soft-corrected uncalibrated; removed by the 12-entry table after calibration |
+| placement / hysteresis | 0.3-soft-corrected uncalibrated; corrected by the calibrated centers |
 
 ## 6. Verification
 
