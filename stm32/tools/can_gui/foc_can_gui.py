@@ -6,6 +6,7 @@ Run:  python3 foc_can_gui.py [--backend slcan] [--channel /dev/ttyACM1] [--demo]
 """
 import argparse
 import math
+import queue
 import sys
 import time
 from collections import deque
@@ -41,7 +42,7 @@ class RxThread(QtCore.QThread):
         self.reconnect = reconnect
         self._running = True
         self._bus = None
-        self._lock = QtCore.QMutex()
+        self._txq = queue.Queue(maxsize=64)
         self._latest = {"status": None, "currents": None, "encoder": None, "ref": None}
         self._last_emit = 0.0
 
@@ -56,9 +57,11 @@ class RxThread(QtCore.QThread):
                                     bitrate=self.bitrate)
                 self.link.emit(True, f"{self.backend}:{self.channel} @ {self.bitrate}")
                 while self._running:
+                    self._drain_tx(can)
                     msg = self._bus.recv(timeout=0.2)
                     if msg is not None:
                         self._dispatch(msg.arbitration_id, msg.data)
+                    self._drain_tx(can)
                     self._flush_latest()
             except Exception as e:                       # noqa: BLE001
                 self.link.emit(False, str(e))
@@ -121,24 +124,43 @@ class RxThread(QtCore.QThread):
         if self.backend == "demo":
             print(f"[demo] would send id=0x{can_id:03X} data={data.hex()}")
             return
-        with QtCore.QMutexLocker(self._lock):
-            if self._bus is None:
-                return
+        try:
+            self._txq.put_nowait((can_id, bytes(data)))
+        except queue.Full:
+            print("send dropped: CAN transmit queue is full")
+
+    def _drain_tx(self, can):
+        if self._bus is None:
+            return
+        while self._running:
             try:
-                import can
-                self._bus.send(can.Message(arbitration_id=can_id, data=data,
-                                           is_extended_id=False))
+                can_id, data = self._txq.get_nowait()
+            except queue.Empty:
+                return
+            msg = can.Message(arbitration_id=can_id, data=data, is_extended_id=False)
+            try:
+                self._bus.send(msg, timeout=0.05)
+            except TypeError:
+                self._bus.send(msg)
             except Exception as e:                       # noqa: BLE001
-                print("send failed:", e)
+                self.link.emit(False, f"send failed: {e}")
+                raise
 
     def _close_bus(self):
-        with QtCore.QMutexLocker(self._lock):
-            if self._bus is not None:
-                try:
-                    self._bus.shutdown()
-                except Exception:                        # noqa: BLE001
-                    pass
-                self._bus = None
+        if self._bus is not None:
+            try:
+                self._bus.shutdown()
+            except Exception:                            # noqa: BLE001
+                pass
+            self._bus = None
+        self._clear_tx()
+
+    def _clear_tx(self):
+        while True:
+            try:
+                self._txq.get_nowait()
+            except queue.Empty:
+                return
 
     def stop(self):
         self._running = False

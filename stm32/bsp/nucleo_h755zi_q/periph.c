@@ -292,7 +292,7 @@ void bsp_usart3_init(void)
   HAL_NVIC_EnableIRQ(USART3_IRQn);
 }
 
-/* FDCAN1: classic CAN 1 Mbit/s (200 MHz / 10 / 20 tq), polled RX FIFO0 */
+/* FDCAN1: classic CAN 500 kbit/s (100 MHz / 10 / 20 tq), polled RX FIFO0 */
 void bsp_fdcan1_init(void)
 {
   LL_APB1_GRP2_EnableClock(LL_APB1_GRP2_PERIPH_FDCAN);
@@ -302,7 +302,7 @@ void bsp_fdcan1_init(void)
   hfdcan1.Instance = FDCAN1;
   hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
   hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
-  hfdcan1.Init.AutoRetransmission = DISABLE;
+  hfdcan1.Init.AutoRetransmission = ENABLE;
   hfdcan1.Init.TransmitPause = DISABLE;
   hfdcan1.Init.ProtocolException = DISABLE;
   hfdcan1.Init.NominalPrescaler = 10;

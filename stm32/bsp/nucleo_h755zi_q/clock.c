@@ -1,5 +1,5 @@
 /* Nucleo-H755ZI-Q clock tree: HSE 8 MHz bypass (ST-LINK MCO) → PLL1 400 MHz SYSCLK,
- * HCLK 200 MHz, APBx 100 MHz (timer kernels 200 MHz). PLL2 200 MHz feeds the
+ * HCLK 200 MHz, APBx 100 MHz (timer kernels 200 MHz). PLL2 Q = 100 MHz feeds the
  * ADC/SPI1/FDCAN/USART3 kernel clocks. I2C1 kernel = APB1 (set in periph.c). */
 #include "board.h"
 
@@ -42,7 +42,7 @@ void bsp_clock_init(void)
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
     Error_Handler();
 
-  /* PLL2: 8/4*100/2 = 200 MHz kernel clock for ADC, SPI1, FDCAN, USART3 */
+  /* PLL2: 8/4*100/2 = 100 MHz kernel clock for ADC, SPI1, FDCAN, USART3 */
   PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_ADC | RCC_PERIPHCLK_SPI1
                                            | RCC_PERIPHCLK_FDCAN | RCC_PERIPHCLK_USART3;
   PeriphClkInitStruct.PLL2.PLL2M = 4;

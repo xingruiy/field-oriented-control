@@ -11,6 +11,8 @@
 
 extern FDCAN_HandleTypeDef hfdcan1;
 
+static uint32_t s_can_restarts;
+
 /* ------------------------------------------------------------------ */
 /* Pack / transmit helpers                                             */
 /* ------------------------------------------------------------------ */
@@ -57,6 +59,26 @@ static bool can_tx(uint32_t id, const uint8_t *data)
     tx.TxEventFifoControl  = FDCAN_NO_TX_EVENTS;
     tx.MessageMarker       = 0;
     return HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &tx, (uint8_t *)data) == HAL_OK;
+}
+
+static void can_recover_if_needed(void)
+{
+    static uint32_t last_recover_ms;
+    FDCAN_ProtocolStatusTypeDef ps = {0};
+    if (HAL_FDCAN_GetProtocolStatus(&hfdcan1, &ps) != HAL_OK)
+        return;
+    if (!ps.BusOff)
+        return;
+
+    uint32_t now = HAL_GetTick();
+    if (now - last_recover_ms < 100U)
+        return;
+    last_recover_ms = now;
+
+    HAL_FDCAN_Stop(&hfdcan1);
+    can_abort_pending_tx();
+    if (HAL_FDCAN_Start(&hfdcan1) == HAL_OK)
+        s_can_restarts++;
 }
 
 /* ------------------------------------------------------------------ */
@@ -205,6 +227,8 @@ void can_init(void)
 
 void can_poll(void)
 {
+    can_recover_if_needed();
+
     /* Drain any received command frames. */
     while (HAL_FDCAN_GetRxFifoFillLevel(&hfdcan1, FDCAN_RX_FIFO0)) {
         FDCAN_RxHeaderTypeDef rx;
