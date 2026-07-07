@@ -46,11 +46,13 @@ build: ## Synthesize + implement -> build/impl/foc_top.bit
 
 bitstream: build ## Alias for build
 
-program: ## Program the Arty S7-50 over USB-JTAG
+program: ## Program the Arty S7-50 FPGA SRAM over USB-JTAG
 	mkdir -p $(VIVADO_WORK)
 	cd $(VIVADO_WORK) && vivado -mode batch -source $(CURDIR)/$(TCL)/program.tcl
 
-flash: build program ## Build bitstream, then program the Arty S7-50
+flash: build ## Build bitstream, then program the Arty S7-50 QSPI flash
+	mkdir -p $(VIVADO_WORK)
+	cd $(VIVADO_WORK) && vivado -mode batch -source $(CURDIR)/$(TCL)/program_flash.tcl
 
 clean: ## Remove sim artifacts (keeps build/impl bitstream)
 	rm -rf build/sim build/vivado xsim.dir xvlog.log xvlog.pb *.jou *.log *.pb .Xil
