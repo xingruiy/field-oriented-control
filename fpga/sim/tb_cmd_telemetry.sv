@@ -1,7 +1,7 @@
 // ============================================================================
 // tb_cmd_telemetry.sv - text command parser / telemetry / watchdog tests
 //
-//  - text commands apply (enable, iq, kp, ki, hall, cal, ol, vq, speed)
+//  - text commands apply (enable, iq, kp, ki, fault, hall, cal, ol, vq, speed)
 //  - unknown keyword echoes '?' without changing state
 //  - watchdog fires after WD_CYC silence; ramps iq_ref to 0; ping recovers
 //  - telemetry streams after "tele" command; ESC stops it
@@ -15,7 +15,7 @@ module tb_cmd_telemetry;
   localparam int TELEM_CYC  = 30000;
   localparam int RAMP_INT   = 64;
   localparam int RAMP_STEP  = 512;
-  localparam int N_TELE_TB  = 48;
+  localparam int N_TELE_TB  = 58;
   localparam int TX_SETTLE  = 300; // cycles — enough for any response to complete
 
   logic clk = 0, rst_n = 0;
@@ -34,8 +34,9 @@ module tb_cmd_telemetry;
 
   q15_t id_meas = 16'sd1111, iq_meas = -16'sd2222;
   angle_t theta = 16'd33333;
-  logic signed [15:0] omega = -16'sd4444;
-  logic [7:0] fault_flags = 8'h5A, status_flags = 8'hC3, err_flags = 8'h07;
+  logic signed [15:0] omega = -16'sd10;
+  logic [7:0] fault_flags = 8'h5A, drv_stat1 = 8'hA6;
+  logic [7:0] status_flags = 8'hC3, err_flags = 8'h07;
   // hall diagnostic readback: 6 known slices (slice s = edge_obs[16*s +: 16])
   logic [95:0] hall_edge_obs =
       {16'h5555, 16'h4444, 16'h3333, 16'h2222, 16'h1111, 16'h0000};
@@ -57,7 +58,6 @@ module tb_cmd_telemetry;
   q15_t iq_now, iq_prev;
   int   tele_idx;
   int   found_tele;
-  logic [15:0] rx_id_v, rx_iq_v;
   logic [7:0]  rx_f_v, rx_s_v, rx_e_v;
 
   // ---- helpers -----------------------------------------------------------
@@ -133,6 +133,36 @@ module tb_cmd_telemetry;
     send_text("ki 2765\n");
     if (kp !== 16'sh1234 || ki !== 16'sh0ACD) begin
       $display("  MISMATCH gains kp=%h ki=%h", kp, ki); errors++;
+    end
+
+    // fault: read-only diagnostic - prints the latest DRV8316 poll bytes
+    drain_tx();
+    send_text("fault\n");
+    begin
+      automatic int ri = -1;
+      logic [7:0] ic_v, st_v;
+      for (int i = 0; i + 2 < tx_q.size(); i++)
+        if (tx_q[i]=="i" && tx_q[i+1]=="c" && tx_q[i+2]=="=") begin
+          ri = i; break;
+        end
+      if (ri < 0 || ri + 13 > tx_q.size()) begin
+        $display("  MISMATCH fault report not found (idx=%0d size=%0d)",
+                 ri, tx_q.size());
+        errors++;
+      end else begin
+        if (tx_q[ri+5]  != " " || tx_q[ri+6]  != "s" ||
+            tx_q[ri+7]  != "t" || tx_q[ri+8]  != "=" ||
+            tx_q[ri+11] != 8'h0D || tx_q[ri+12] != 8'h0A) begin
+          $display("  MISMATCH fault report structure"); errors++;
+        end
+        ic_v = {hex_nibble(tx_q[ri+3]), hex_nibble(tx_q[ri+4])};
+        st_v = {hex_nibble(tx_q[ri+9]), hex_nibble(tx_q[ri+10])};
+        if (ic_v !== fault_flags || st_v !== drv_stat1) begin
+          $display("  MISMATCH fault report ic=%h st=%h (exp %h %h)",
+                   ic_v, st_v, fault_flags, drv_stat1);
+          errors++;
+        end
+      end
     end
 
     // hall: read-only diagnostic - prints "h0=.. h5=.." for the 6 slices
@@ -307,39 +337,41 @@ module tb_cmd_telemetry;
                tele_idx, tx_q.size());
       errors++;
     end else begin
-      // Check label structure at fixed offsets from tele_idx
-      if (tx_q[tele_idx+7]  != " "   || tx_q[tele_idx+8]  != "i" ||
-          tx_q[tele_idx+9]  != "q"   || tx_q[tele_idx+10] != "=" ||
-          tx_q[tele_idx+15] != " "   || tx_q[tele_idx+16] != "t" ||
-          tx_q[tele_idx+17] != "h"   || tx_q[tele_idx+18] != "=" ||
-          tx_q[tele_idx+23] != " "   || tx_q[tele_idx+24] != "o" ||
-          tx_q[tele_idx+25] != "m"   || tx_q[tele_idx+26] != "=" ||
-          tx_q[tele_idx+31] != " "   || tx_q[tele_idx+32] != "f" ||
-          tx_q[tele_idx+33] != "="   || tx_q[tele_idx+36] != " " ||
-          tx_q[tele_idx+37] != "s"   || tx_q[tele_idx+38] != "=" ||
-          tx_q[tele_idx+41] != " "   || tx_q[tele_idx+42] != "e" ||
-          tx_q[tele_idx+43] != "="   ||
-          tx_q[tele_idx+46] != 8'h0D || tx_q[tele_idx+47] != 8'h0A) begin
+      // Check fixed-decimal structure:
+      // id=+0.042 iq=-0.085 th=183.10 om=-00732.4 f=5A s=C3 e=07
+      if (tx_q[tele_idx+9]  != " "   || tx_q[tele_idx+10] != "i" ||
+          tx_q[tele_idx+11] != "q"   || tx_q[tele_idx+12] != "=" ||
+          tx_q[tele_idx+19] != " "   || tx_q[tele_idx+20] != "t" ||
+          tx_q[tele_idx+21] != "h"   || tx_q[tele_idx+22] != "=" ||
+          tx_q[tele_idx+29] != " "   || tx_q[tele_idx+30] != "o" ||
+          tx_q[tele_idx+31] != "m"   || tx_q[tele_idx+32] != "=" ||
+          tx_q[tele_idx+41] != " "   || tx_q[tele_idx+42] != "f" ||
+          tx_q[tele_idx+43] != "="   || tx_q[tele_idx+46] != " " ||
+          tx_q[tele_idx+47] != "s"   || tx_q[tele_idx+48] != "=" ||
+          tx_q[tele_idx+51] != " "   || tx_q[tele_idx+52] != "e" ||
+          tx_q[tele_idx+53] != "="   ||
+          tx_q[tele_idx+56] != 8'h0D || tx_q[tele_idx+57] != 8'h0A) begin
         $display("  MISMATCH telemetry frame structure"); errors++;
       end else begin
-        // Decode id field (hex nibbles at offsets 3..6)
-        rx_id_v = {hex_nibble(tx_q[tele_idx+3]),  hex_nibble(tx_q[tele_idx+4]),
-                   hex_nibble(tx_q[tele_idx+5]),  hex_nibble(tx_q[tele_idx+6])};
-        if (rx_id_v !== 16'(id_meas)) begin
-          $display("  MISMATCH telemetry id=%h (exp %h)", rx_id_v, id_meas);
-          errors++;
+        if (tx_q[tele_idx+3]  != "+" || tx_q[tele_idx+4]  != "0" ||
+            tx_q[tele_idx+5]  != "." || tx_q[tele_idx+6]  != "0" ||
+            tx_q[tele_idx+7]  != "4" || tx_q[tele_idx+8]  != "2" ||
+            tx_q[tele_idx+13] != "-" || tx_q[tele_idx+14] != "0" ||
+            tx_q[tele_idx+15] != "." || tx_q[tele_idx+16] != "0" ||
+            tx_q[tele_idx+17] != "8" || tx_q[tele_idx+18] != "5" ||
+            tx_q[tele_idx+23] != "1" || tx_q[tele_idx+24] != "8" ||
+            tx_q[tele_idx+25] != "3" || tx_q[tele_idx+26] != "." ||
+            tx_q[tele_idx+27] != "1" || tx_q[tele_idx+28] != "0" ||
+            tx_q[tele_idx+33] != "-" || tx_q[tele_idx+34] != "0" ||
+            tx_q[tele_idx+35] != "0" || tx_q[tele_idx+36] != "7" ||
+            tx_q[tele_idx+37] != "3" || tx_q[tele_idx+38] != "2" ||
+            tx_q[tele_idx+39] != "." || tx_q[tele_idx+40] != "4") begin
+          $display("  MISMATCH telemetry fixed-decimal values"); errors++;
         end
-        // Decode iq field (offsets 11..14)
-        rx_iq_v = {hex_nibble(tx_q[tele_idx+11]), hex_nibble(tx_q[tele_idx+12]),
-                   hex_nibble(tx_q[tele_idx+13]), hex_nibble(tx_q[tele_idx+14])};
-        if (rx_iq_v !== 16'(iq_meas)) begin
-          $display("  MISMATCH telemetry iq=%h (exp %h)", rx_iq_v, iq_meas);
-          errors++;
-        end
-        // Decode fault (34-35), status (39-40) and err (44-45)
-        rx_f_v = {hex_nibble(tx_q[tele_idx+34]), hex_nibble(tx_q[tele_idx+35])};
-        rx_s_v = {hex_nibble(tx_q[tele_idx+39]), hex_nibble(tx_q[tele_idx+40])};
-        rx_e_v = {hex_nibble(tx_q[tele_idx+44]), hex_nibble(tx_q[tele_idx+45])};
+        // Decode fault (44-45), status (49-50) and err (54-55)
+        rx_f_v = {hex_nibble(tx_q[tele_idx+44]), hex_nibble(tx_q[tele_idx+45])};
+        rx_s_v = {hex_nibble(tx_q[tele_idx+49]), hex_nibble(tx_q[tele_idx+50])};
+        rx_e_v = {hex_nibble(tx_q[tele_idx+54]), hex_nibble(tx_q[tele_idx+55])};
         if (rx_f_v !== fault_flags || rx_s_v !== status_flags
             || rx_e_v !== err_flags) begin
           $display("  MISMATCH telemetry f=%h s=%h e=%h (exp %h %h %h)",

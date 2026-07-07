@@ -79,7 +79,7 @@ module tb_foc_top;
     .ol_mode(ol_cmd), .vq_ol(vq_ol_cmd), .ol_speed(ol_speed_cmd),
     .wd_timeout,
     .id_meas, .iq_meas, .theta(theta_codes), .omega(omega_tel),
-    .fault_flags('0), .status_flags('0), .err_flags('0),
+    .fault_flags('0), .drv_stat1('0), .status_flags('0), .err_flags('0),
     .hall_edge_obs('0));
 
   uart_tx #(.BAUD_DIV(BAUD_DIV)) u_dut_tx

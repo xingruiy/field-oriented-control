@@ -20,15 +20,19 @@
 //      ol  <0|1>           open-loop mode
 //      vq  <int16>         open-loop Vq (Q1.15, signed)
 //      speed <int16>       open-loop angle codes/period (signed)
+//      fault               print latest DRV8316 IC_STAT and STAT1 poll bytes
 //      hall                print the 6 live observed hall-edge crossings
 //
 //  FPGA → Host:
 //    "OK\r\n"  after every accepted command
 //    "?\r\n"   on unknown keyword
 //    While tele_en, every TELEM_CYC clks:
-//      "id=XXXX iq=XXXX th=XXXX om=XXXX f=XX s=XX e=XX\r\n"  (48 bytes, hex)
+//      "id=+1.250 iq=-0.085 th=183.10 om=-00732.4 f=XX s=XX e=XX\r\n"
+//      id/iq are amps, theta is degrees, omega is rpm; f/s/e stay hex.
 //    After "hall", once: the observer's last edge angle per sector
 //      "h0=XXXX h1=XXXX h2=XXXX h3=XXXX h4=XXXX h5=XXXX\r\n"  (50 bytes, hex)
+//    After "fault", once: the latest DRV8316 fault/status register poll
+//      "ic=XX st=XX\r\n"  (13 bytes, hex)
 //
 //  Watchdog: no accepted command for WD_CYC clks (100 ms default) →
 //    wd_timeout asserts; iq_ref ramps to 0 (RAMP_STEP per RAMP_INTERVAL).
@@ -67,6 +71,7 @@ module cmd_telemetry
   input  angle_t     theta,
   input  logic signed [15:0] omega,
   input  logic [7:0] fault_flags,
+  input  logic [7:0] drv_stat1,
   input  logic [7:0] status_flags,
   input  logic [7:0] err_flags,    // sticky link/sensor errors (foc_top)
   input  logic [95:0] hall_edge_obs // 6 x angle_t live observed crossings
@@ -190,6 +195,7 @@ module cmd_telemetry
   logic        resp_ok_req;  // strobe → TX: queue "OK\r\n"
   logic        resp_err_req; // strobe → TX: queue "?\r\n"
   logic        hall_report_req; // strobe → TX: queue the "h0=..h5=" line
+  logic        fault_report_req; // strobe → TX: queue the "ic=.. st=.." line
 
   function automatic logic signed [15:0] to_signed(
       input logic [15:0] v, input logic neg);
@@ -220,6 +226,7 @@ module cmd_telemetry
   localparam logic [63:0] KW_OL      = {"ol",      48'h0};
   localparam logic [63:0] KW_VQ      = {"vq",      48'h0};
   localparam logic [63:0] KW_SPEED   = {"speed",   24'h0};
+  localparam logic [63:0] KW_FAULT   = {"fault",   24'h0};
   localparam logic [63:0] KW_HALL    = {"hall",    32'h0};
 
   always_ff @(posedge clk or negedge rst_n) begin
@@ -242,11 +249,13 @@ module cmd_telemetry
       resp_ok_req      <= 1'b0;
       resp_err_req     <= 1'b0;
       hall_report_req  <= 1'b0;
+      fault_report_req <= 1'b0;
     end else begin
       offset_cal_start <= 1'b0;
       resp_ok_req      <= 1'b0;
       resp_err_req     <= 1'b0;
       hall_report_req  <= 1'b0;
+      fault_report_req <= 1'b0;
 
       // ESC stops telemetry
       if (rx_valid && rx_data == 8'h1B)
@@ -297,6 +306,9 @@ module cmd_telemetry
         end else if (kw == KW_SPEED) begin
           ol_speed    <= to_signed(arg1, arg1_neg);
           wd_cnt      <= '0; wd_timeout <= 1'b0; resp_ok_req <= 1'b1;
+        end else if (kw == KW_FAULT) begin
+          fault_report_req <= 1'b1; // read-only diagnostic; args ignored
+          wd_cnt      <= '0; wd_timeout <= 1'b0; resp_ok_req <= 1'b1;
         end else if (kw == KW_HALL) begin
           hall_report_req <= 1'b1; // read-only diagnostic; args ignored
           wd_cnt      <= '0; wd_timeout <= 1'b0; resp_ok_req <= 1'b1;
@@ -314,67 +326,129 @@ module cmd_telemetry
   // ------------------------------------------------------------------
   // Telemetry byte builder
   // ------------------------------------------------------------------
-  localparam int unsigned N_TELE = 48; // "id=XXXX iq=XXXX th=XXXX om=XXXX f=XX s=XX e=XX\r\n"
+  localparam int unsigned N_TELE = 58; // fixed-decimal line; see header
 
-  q15_t   l_id, l_iq;
-  angle_t l_th;
-  logic signed [15:0] l_om;
+  logic signed [15:0] l_id_ma, l_iq_ma; // signed milliamps, +/-1250
+  logic [15:0] l_th_cdeg;               // centidegrees, 0..35999
+  logic signed [31:0] l_om_rpm10;       // signed rpm * 10, saturated
   logic [7:0]  l_fault, l_stat, l_err;
 
   function automatic logic [7:0] nibble_to_hex(input logic [3:0] n);
     return (n < 4'd10) ? (8'h30 + {4'h0, n}) : (8'h37 + {4'h0, n});
   endfunction
 
+  function automatic logic signed [15:0] q15_to_ma(input q15_t x);
+    logic signed [31:0] prod;
+    logic signed [31:0] scaled;
+    prod = 32'(x) * 32'sd1250;
+    scaled = (prod >= 0) ? ((prod + 32'sd16384) >>> 15)
+                         : -(((-prod) + 32'sd16384) >>> 15);
+    return scaled[15:0];
+  endfunction
+
+  function automatic logic [15:0] angle_to_cdeg(input angle_t a);
+    logic [31:0] prod;
+    prod = 32'(a) * 32'd36000;
+    return prod[31:16]; // floor avoids printing 360.00 at wrap - 1 LSB
+  endfunction
+
+  function automatic logic signed [31:0] omega_to_rpm10(
+      input logic signed [15:0] om);
+    logic signed [63:0] prod;
+    logic signed [63:0] scaled;
+    prod = 64'(om) * 64'sd48000000; // codes/period * 60 * 80 kHz * 10
+    scaled = (prod >= 0) ? ((prod + 64'sd32768) >>> 16)
+                         : -(((-prod) + 64'sd32768) >>> 16);
+    if      (scaled >  64'sd999999) return 32'sd999999;
+    else if (scaled < -64'sd999999) return -32'sd999999;
+    else                            return scaled[31:0];
+  endfunction
+
+  function automatic logic [15:0] abs_s16(input logic signed [15:0] v);
+    logic [15:0] a;
+    a = (v < 0) ? -v : v;
+    return a;
+  endfunction
+
+  function automatic logic [19:0] abs_s32_20(input logic signed [31:0] v);
+    logic [31:0] a;
+    a = (v < 0) ? -v : v;
+    return a[19:0];
+  endfunction
+
+  function automatic logic [7:0] dec_digit(input logic [19:0] v,
+                                           input int unsigned place);
+    logic [7:0] d;
+    d = (v / place) % 10;
+    return 8'h30 + d;
+  endfunction
+
   function automatic logic [7:0] tele_byte(input logic [5:0] i);
+    logic [15:0] id_abs, iq_abs;
+    logic [19:0] th_abs, om_abs;
+    id_abs = abs_s16(l_id_ma);
+    iq_abs = abs_s16(l_iq_ma);
+    th_abs = {4'b0, l_th_cdeg};
+    om_abs = abs_s32_20(l_om_rpm10);
     unique case (i)
       6'd0:  return "i";
       6'd1:  return "d";
       6'd2:  return "=";
-      6'd3:  return nibble_to_hex(l_id[15:12]);
-      6'd4:  return nibble_to_hex(l_id[11:8]);
-      6'd5:  return nibble_to_hex(l_id[7:4]);
-      6'd6:  return nibble_to_hex(l_id[3:0]);
-      6'd7:  return " ";
-      6'd8:  return "i";
-      6'd9:  return "q";
-      6'd10: return "=";
-      6'd11: return nibble_to_hex(l_iq[15:12]);
-      6'd12: return nibble_to_hex(l_iq[11:8]);
-      6'd13: return nibble_to_hex(l_iq[7:4]);
-      6'd14: return nibble_to_hex(l_iq[3:0]);
-      6'd15: return " ";
-      6'd16: return "t";
-      6'd17: return "h";
-      6'd18: return "=";
-      6'd19: return nibble_to_hex(l_th[15:12]);
-      6'd20: return nibble_to_hex(l_th[11:8]);
-      6'd21: return nibble_to_hex(l_th[7:4]);
-      6'd22: return nibble_to_hex(l_th[3:0]);
-      6'd23: return " ";
-      6'd24: return "o";
-      6'd25: return "m";
-      6'd26: return "=";
-      6'd27: return nibble_to_hex(l_om[15:12]);
-      6'd28: return nibble_to_hex(l_om[11:8]);
-      6'd29: return nibble_to_hex(l_om[7:4]);
-      6'd30: return nibble_to_hex(l_om[3:0]);
-      6'd31: return " ";
-      6'd32: return "f";
-      6'd33: return "=";
-      6'd34: return nibble_to_hex(l_fault[7:4]);
-      6'd35: return nibble_to_hex(l_fault[3:0]);
-      6'd36: return " ";
-      6'd37: return "s";
-      6'd38: return "=";
-      6'd39: return nibble_to_hex(l_stat[7:4]);
-      6'd40: return nibble_to_hex(l_stat[3:0]);
+      6'd3:  return (l_id_ma < 0) ? "-" : "+";
+      6'd4:  return dec_digit({4'b0, id_abs}, 1000);
+      6'd5:  return ".";
+      6'd6:  return dec_digit({4'b0, id_abs}, 100);
+      6'd7:  return dec_digit({4'b0, id_abs}, 10);
+      6'd8:  return dec_digit({4'b0, id_abs}, 1);
+      6'd9:  return " ";
+      6'd10: return "i";
+      6'd11: return "q";
+      6'd12: return "=";
+      6'd13: return (l_iq_ma < 0) ? "-" : "+";
+      6'd14: return dec_digit({4'b0, iq_abs}, 1000);
+      6'd15: return ".";
+      6'd16: return dec_digit({4'b0, iq_abs}, 100);
+      6'd17: return dec_digit({4'b0, iq_abs}, 10);
+      6'd18: return dec_digit({4'b0, iq_abs}, 1);
+      6'd19: return " ";
+      6'd20: return "t";
+      6'd21: return "h";
+      6'd22: return "=";
+      6'd23: return dec_digit(th_abs, 10000);
+      6'd24: return dec_digit(th_abs, 1000);
+      6'd25: return dec_digit(th_abs, 100);
+      6'd26: return ".";
+      6'd27: return dec_digit(th_abs, 10);
+      6'd28: return dec_digit(th_abs, 1);
+      6'd29: return " ";
+      6'd30: return "o";
+      6'd31: return "m";
+      6'd32: return "=";
+      6'd33: return (l_om_rpm10 < 0) ? "-" : "+";
+      6'd34: return dec_digit(om_abs, 100000);
+      6'd35: return dec_digit(om_abs, 10000);
+      6'd36: return dec_digit(om_abs, 1000);
+      6'd37: return dec_digit(om_abs, 100);
+      6'd38: return dec_digit(om_abs, 10);
+      6'd39: return ".";
+      6'd40: return dec_digit(om_abs, 1);
       6'd41: return " ";
-      6'd42: return "e";
+      6'd42: return "f";
       6'd43: return "=";
-      6'd44: return nibble_to_hex(l_err[7:4]);
-      6'd45: return nibble_to_hex(l_err[3:0]);
-      6'd46: return 8'h0D; // CR
-      6'd47: return 8'h0A; // LF
+      6'd44: return nibble_to_hex(l_fault[7:4]);
+      6'd45: return nibble_to_hex(l_fault[3:0]);
+      6'd46: return " ";
+      6'd47: return "s";
+      6'd48: return "=";
+      6'd49: return nibble_to_hex(l_stat[7:4]);
+      6'd50: return nibble_to_hex(l_stat[3:0]);
+      6'd51: return " ";
+      6'd52: return "e";
+      6'd53: return "=";
+      6'd54: return nibble_to_hex(l_err[7:4]);
+      6'd55: return nibble_to_hex(l_err[3:0]);
+      6'd56: return 8'h0D; // CR
+      6'd57: return 8'h0A; // LF
       default: return " ";
     endcase
   endfunction
@@ -386,6 +460,7 @@ module cmd_telemetry
   // ------------------------------------------------------------------
   localparam int unsigned N_REP = 50;
   logic [95:0] l_hall; // latched hall_edge_obs at report start
+  logic [15:0] l_drv_fault; // {IC_STAT, STAT1} at report start
 
   function automatic logic [7:0] rep_byte(input logic [5:0] i);
     logic [2:0] k, off;
@@ -405,6 +480,31 @@ module cmd_telemetry
   endfunction
 
   // ------------------------------------------------------------------
+  // DRV8316 fault report builder
+  //   "ic=XX st=XX\r\n" (13 bytes)
+  // ------------------------------------------------------------------
+  localparam int unsigned N_FAULT_REP = 13;
+
+  function automatic logic [7:0] fault_rep_byte(input logic [3:0] i);
+    unique case (i)
+      4'd0:  return "i";
+      4'd1:  return "c";
+      4'd2:  return "=";
+      4'd3:  return nibble_to_hex(l_drv_fault[15:12]);
+      4'd4:  return nibble_to_hex(l_drv_fault[11:8]);
+      4'd5:  return " ";
+      4'd6:  return "s";
+      4'd7:  return "t";
+      4'd8:  return "=";
+      4'd9:  return nibble_to_hex(l_drv_fault[7:4]);
+      4'd10: return nibble_to_hex(l_drv_fault[3:0]);
+      4'd11: return 8'h0D;
+      4'd12: return 8'h0A;
+      default: return " ";
+    endcase
+  endfunction
+
+  // ------------------------------------------------------------------
   // TX: responses take priority over telemetry
   // ------------------------------------------------------------------
   logic [7:0] resp_buf [3:0]; // max 4 bytes: "OK\r\n"
@@ -418,6 +518,8 @@ module cmd_telemetry
 
   logic        report_pending;
   logic [5:0]  rep_ridx;
+  logic        fault_report_pending;
+  logic [3:0]  fault_rep_ridx;
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
@@ -433,8 +535,11 @@ module cmd_telemetry
       sending     <= 1'b0;
       report_pending <= 1'b0;
       rep_ridx       <= '0;
+      fault_report_pending <= 1'b0;
+      fault_rep_ridx       <= '0;
       l_hall      <= '0;
-      l_id <= '0; l_iq <= '0; l_th <= '0; l_om <= '0;
+      l_drv_fault <= '0;
+      l_id_ma <= '0; l_iq_ma <= '0; l_th_cdeg <= '0; l_om_rpm10 <= '0;
       l_fault <= '0; l_stat <= '0; l_err <= '0;
     end else begin
       tx_valid <= 1'b0;
@@ -445,6 +550,12 @@ module cmd_telemetry
         l_hall         <= hall_edge_obs;
         report_pending <= 1'b1;
         rep_ridx       <= '0;
+      end
+
+      if (fault_report_req) begin
+        l_drv_fault          <= {fault_flags, drv_stat1};
+        fault_report_pending <= 1'b1;
+        fault_rep_ridx       <= '0;
       end
 
       // Latch new response (resp_ok/err_req are 1-cycle strobes from dispatch)
@@ -483,6 +594,15 @@ module cmd_telemetry
             rep_ridx       <= '0;
           end else
             rep_ridx <= rep_ridx + 1'b1;
+        end else if (fault_report_pending) begin
+          // Send DRV8316 fault diagnostic byte
+          tx_data  <= fault_rep_byte(fault_rep_ridx);
+          tx_valid <= 1'b1;
+          if (fault_rep_ridx == 4'(N_FAULT_REP - 1)) begin
+            fault_report_pending <= 1'b0;
+            fault_rep_ridx       <= '0;
+          end else
+            fault_rep_ridx <= fault_rep_ridx + 1'b1;
         end else if (sending) begin
           // Send telemetry byte
           tx_data  <= tele_byte(tidx);
@@ -499,8 +619,10 @@ module cmd_telemetry
               tele_cnt <= '0;
               sending  <= 1'b1;
               tidx     <= '0;
-              l_id <= id_meas; l_iq <= iq_meas; l_th <= theta;
-              l_om <= omega;
+              l_id_ma    <= q15_to_ma(id_meas);
+              l_iq_ma    <= q15_to_ma(iq_meas);
+              l_th_cdeg  <= angle_to_cdeg(theta);
+              l_om_rpm10 <= omega_to_rpm10(omega);
               l_fault <= fault_flags; l_stat <= status_flags;
               l_err <= err_flags;
             end else

@@ -280,8 +280,11 @@ Modes and protection, all in `foc_core`:
   protects only the driver;
 - `sat_any`: OR of every stage's saturation flag, exported in telemetry.
 
-Telemetry format: `[0xAA][0x10][10][id, iq, θ, ω (int16 LE each)][fault_flags][status_flags][CHK]`,
-every 5 ms. Bus voltage is not streamed (no Vbus sensing channel).
+Telemetry is an ASCII UART line every 100 ms:
+`id=+1.250 iq=-0.085 th=183.10 om=-00732.4 f=XX s=XX e=XX`.
+The physical values are fixed-decimal amps, electrical degrees, and rpm;
+the diagnostic flags remain raw hex bitfields. Bus voltage is not streamed
+(no Vbus sensing channel).
 
 The safe-state gate (in `foc_top`, combinational between `pwm_gen` and
 the pins):

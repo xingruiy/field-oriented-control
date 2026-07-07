@@ -80,7 +80,7 @@ module foc_top
     .ol_mode, .vq_ol, .ol_speed,
     .wd_timeout,
     .id_meas, .iq_meas, .theta(theta_mux), .omega,
-    .fault_flags(ic_stat),
+    .fault_flags(ic_stat), .drv_stat1(stat1),
     .status_flags({cfg_done, cfg_err, ocp_trip, wd_timeout,
                    enable, cal_busy, sat_any, nfault_s}),
     .err_flags({5'b0, ferr_sticky, hill_sticky, hall_illegal}),

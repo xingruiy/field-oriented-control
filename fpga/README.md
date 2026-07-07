@@ -67,23 +67,26 @@ watchdog (silence ⇒ iq_ref ramps to 0, gates off). ESC stops telemetry.
 | `cal`              | offset calibration (only while disabled)      |
 | `ping`             | watchdog kick only                            |
 | `tele`             | start telemetry streaming                     |
+| `fault`            | print latest DRV8316 `IC_STAT`/`STAT1` bytes  |
 | `ol <0\|1>`        | open-loop mode                                |
 | `vq <int16>`       | open-loop Vq, Q1.15                           |
 | `speed <int16>`    | open-loop speed, angle codes/period           |
 | `hall <idx> <ang>` | hall edge table write: idx 0–11, angle 0–65535|
 
-FPGA → host every 100 ms, ASCII line (48 bytes):
+FPGA → host every 100 ms, ASCII line (58 bytes):
 ```
-id=XXXX iq=XXXX th=XXXX om=XXXX f=XX s=XX e=XX\r\n
+id=+1.250 iq=-0.085 th=183.10 om=-00732.4 f=XX s=XX e=XX\r\n
 ```
-All values are raw hex: Q1.15 two's-complement for `id`/`iq` (1.0 = 7FFF = 1.25 A),
-unsigned 16-bit for `th`, signed 16-bit two's-complement for `om`, 8-bit for `f`/`s`/`e`.
-Readable directly in PuTTY or any terminal at 115200 8N1.
+`id`/`iq` are amps, `th` is electrical degrees, and `om` is rpm. `f`/`s`/`e`
+remain raw 8-bit hex bitfields. Readable directly in PuTTY or any terminal
+at 115200 8N1.
 
 `s` (status_flags) bits `[7:0]`: `{cfg_done, cfg_err, ocp_trip, wd_timeout, enable, cal_busy, sat_any, nfault}`.
 `e` (err_flags) bits `[2:0]`: `{uart_frame_err_sticky, hall_illegal_sticky, hall_illegal_live}`
 (sticky bits clear on reset; a live illegal hall code also kills the gates
 in closed loop).
+The `fault` command returns one line, `ic=XX st=XX`, from the latest DRV8316
+`IC_STAT` and `STAT1` poll.
 
 ## Overview
 
