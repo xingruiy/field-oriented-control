@@ -67,6 +67,14 @@
 #define HALL_PLL_KP             0.30f
 #define HALL_PLL_KI             0.50f
 
+/* Invalid Hall code (0b000/0b111) supervision: while a Hall-consuming drive
+ * mode is running (FOC, block, rotor-voltage), an invalid code persisting for
+ * this many consecutive 40 kHz ticks kills the bridge and latches a fault.
+ * The persistence filter exists because sensor skew during a normal edge can
+ * pass through 0/7 for a few µs — a real disconnect (pull-ups → 0b111) lasts
+ * forever. 8 ticks = 200 µs. */
+#define HALL_INVALID_TRIP_TICKS 8U
+
 /* Sign mapping electrical-angle direction → physical rotation, so reported
  * direction/speed match reality. On this unit the rotor turns CW as the
  * electrical angle θe increases, so the relationship is inverted (−1). This
@@ -79,7 +87,27 @@
 #define PID_D_KI                18200.6f
 #define PID_Q_KP                0.798f
 #define PID_Q_KI                18200.6f
-#define PID_VOUT_MAX_V          12.0f       /* Vbus/2, conservative */
+
+/* dq voltage-vector limit. The largest undistorted (linear SVM) phase-voltage
+ * amplitude is Vbus/√3; beyond it foc_svm() clamps per-phase duty and bends
+ * the vector. Limit |v| to that circle with a small margin, d-axis first:
+ * vd gets the full budget, vq gets what remains (√(V²−vd²)) — flux control
+ * keeps priority and the PI anti-windup stays truthful in saturation. */
+#define VDQ_LIMIT_FRAC          0.95f
+#define VDQ_MAX_V               (VBUS_V * VDQ_LIMIT_FRAC / M_SQRT3_F)  /* ≈13.2 V */
+
+/* Dead-time compensation. Each switching edge loses ~t_dt of commanded volt-
+ * seconds in the direction opposing the phase current: ΔV = Vbus·t_dt·f_pwm·
+ * sign(i). At 24 V / 40 kHz this is ~0.5 V — the same order as this motor's
+ * whole I·R working voltage — so foc_svm() adds it back per phase. t_dt is the
+ * effective bridge dead time: TIM1 150 ns + DRV8316 ~0.35 µs at 200 V/µs slew
+ * (delay compensation on). Deliberately a mild underestimate — overcompensation
+ * causes zero-crossing oscillation; undercompensation just leaves residual
+ * distortion. Set to 0 to disable. Below DT_COMP_I_TH_A the correction tapers
+ * linearly through zero so measurement noise cannot chatter the sign. */
+#define DT_COMP_T_S             0.5e-6f
+#define DT_COMP_V               (VBUS_V * DT_COMP_T_S * 40000.0f)      /* ≈0.48 V */
+#define DT_COMP_I_TH_A          0.05f
 
 /* TIM1 parameters — must match CubeMX configuration.
  * STM32H755 @ 400 MHz sysclk (VOS1): 
@@ -145,6 +173,12 @@
 #define TUNE_LS_VSTEP_V         3.0f
 #define TUNE_LS_CAP_N           16u         /* PWM-rate samples per capture  */
 #define TUNE_LS_DECAY_MS        5u          /* let current decay before step */
+/* Transport delay of the step, in PWM ticks. Sample k is taken (counter peak)
+ * BEFORE the CCR write at tick 0, and CCR is preloaded, so the step reaches
+ * the bridge only at the next update event: sample k has seen between
+ * (k−1)·Ts and (k−0.5)·Ts of drive, not k·Ts. With τ ≈ 4 ticks, ignoring this
+ * overestimates Ls by ~30%. 0.75 is the midpoint of the update-phase bound. */
+#define TUNE_LS_DELAY_TICKS     0.75f
 
 /* Speed-loop relay (Åström) autotune → Tyreus–Luyben PI rule. */
 #define TUNE_SPEED_RPM          500.0f      /* default relay setpoint        */
@@ -184,6 +218,15 @@
 #define CAN_CAL_TYPE_HALL       2U
 #define CAN_TLM_PERIOD_MS       10U         /* 100 Hz                          */
 
+/* CAN dead-man: if the last motion setpoint (iq/speed) came over CAN and no
+ * control frame arrives for this long while FOC is enabled, disable the bridge
+ * (the host is presumed dead — don't keep spinning at its last command).
+ * 0 disables the timeout. Default 0 because the bundled can_gui sends one-shot
+ * setpoints; set to e.g. 1000 once the host re-sends its setpoint periodically.
+ * A local CLI iq/spd command takes ownership back and disarms the timeout;
+ * the arm-position supervisor is autonomous and never subject to it. */
+#define CAN_CMD_TIMEOUT_MS      0U
+
 /* ------------------------------------------------------------------ */
 /* Debugging / bring-up features                                      */
 /* ------------------------------------------------------------------ */
@@ -196,6 +239,14 @@
 
 /* hchk pass limit: per-state |circular mean| of θ̂ − θ_forced (degrees). */
 #define HCHK_PASS_ERR_DEG       5.0f
+
+/* Independent watchdog (IWDG1 on LSI ≈ 32 kHz), refreshed from fault_poll()
+ * in the main superloop. Catches a hung main loop — the 40 kHz ISR would
+ * otherwise keep driving the motor with no fault supervision, CLI, or CAN.
+ * The timeout must outlast the longest blocking CLI routine (stune ~15 s,
+ * hcal ~8 s, neither refreshes the watchdog), hence prescaler 256 / reload
+ * 4095 → ~32.8 s. Frozen while the core is halted by a debugger (DBGMCU). */
+#define FOC_IWDG_ENABLE         1
 
 /* Black box: disabled by default so it cannot add work to the 40 kHz loop.
  * Set FOC_DEBUG_ENABLE and FOC_BBOX_ENABLE to 1 for a diagnostic build. */

@@ -23,6 +23,12 @@ void pid_set_gains(PidState *s, float kp, float ki)
     s->ki = ki;
 }
 
+void pid_set_output_limits(PidState *s, float out_min, float out_max)
+{
+    s->out_min = out_min;
+    s->out_max = out_max;
+}
+
 float pid_update(PidState *s, float error, float dt)
 {
     s->integral += error * dt;

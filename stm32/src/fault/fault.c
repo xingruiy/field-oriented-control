@@ -22,6 +22,35 @@ static bool nfault_asserted(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Independent watchdog (IWDG1). Register-level — 4 writes; the vendored */
+/* HAL tree does not include the IWDG module. Once started it can only  */
+/* be fed, never stopped. See FOC_IWDG_ENABLE in settings.h.            */
+/* ------------------------------------------------------------------ */
+
+#if FOC_IWDG_ENABLE
+static void iwdg_start(void)
+{
+    /* Freeze the watchdog while the core is halted by a debugger, so
+     * breakpoints don't reset the board. */
+    DBGMCU->APB4FZ1 |= DBGMCU_APB4FZ1_DBG_IWDG1;
+
+    IWDG1->KR  = 0x0000CCCCu;            /* enable the watchdog          */
+    IWDG1->KR  = 0x00005555u;            /* unlock PR/RLR                */
+    IWDG1->PR  = 6u;                     /* LSI/256                      */
+    IWDG1->RLR = 0x0FFFu;                /* 4096·256/32 kHz ≈ 32.8 s     */
+    IWDG1->KR  = 0x0000AAAAu;            /* load the reload value        */
+}
+
+static inline void iwdg_refresh(void)
+{
+    IWDG1->KR = 0x0000AAAAu;
+}
+#else
+static void iwdg_start(void)          {}
+static inline void iwdg_refresh(void) {}
+#endif
+
+/* ------------------------------------------------------------------ */
 /* nFAULT EXTI — overrides HAL weak callback                          */
 /* Invoked from EXTI9_5_IRQHandler -> HAL_GPIO_EXTI_IRQHandler.        */
 /* ------------------------------------------------------------------ */
@@ -115,6 +144,21 @@ static void service_fault(void)
 
 void fault_poll(void)
 {
+    /* Main-loop heartbeat: a hung superloop must not leave the 40 kHz ISR
+     * driving the motor with no supervision. */
+    iwdg_refresh();
+
+    /* Invalid-Hall-code backstop: the 40 kHz loop already cut MOE in-ISR. */
+    if (foc_hall_tripped()) {
+        foc_clear_hall_trip();
+        if (!s_fault_active) {
+            foc_disable();
+            s_fault_active = true;
+            cli_print("\r\n!! INVALID HALL STATE (0b000/0b111) — bridge disabled\r\n"
+                      "  check Hall sensor cable/supply; clear with 'clrf'.\r\n> ");
+        }
+    }
+
     /* Software overcurrent backstop: the 40 kHz loop already cut MOE in-ISR;
      * latch it as a fault here (thread ctx) so `en` is blocked until `clrf`. */
     if (foc_oc_tripped()) {
@@ -173,6 +217,7 @@ void fault_init(void)
     if (nfault_asserted()) {
         s_nfault_pending = 1;   /* fault already asserted at boot */
     }
+    iwdg_start();
 }
 
 bool fault_is_active(void)
@@ -184,6 +229,7 @@ void fault_clear(void)
 {
     drv8316_clear_faults();
     foc_clear_oc_trip();
+    foc_clear_hall_trip();
     s_fault_active = false;
     s_otw_warned   = false;
     s_nfault_pending = 0;

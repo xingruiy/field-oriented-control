@@ -72,6 +72,12 @@ static void adc_common(ADC_HandleTypeDef *h, ADC_TypeDef *inst)
   h->Init.Oversampling.Ratio = 1;
   if (HAL_ADC_Init(h) != HAL_OK)
     Error_Handler();
+  /* Mandatory on H7: run the ADC's own offset + linearity self-calibration
+   * after every power-up, while the ADC is still disabled. The FOC zero-
+   * current offset calibration absorbs DC offset but not gain/linearity. */
+  if (HAL_ADCEx_Calibration_Start(h, ADC_CALIB_OFFSET_LINEARITY,
+                                  ADC_SINGLE_ENDED) != HAL_OK)
+    Error_Handler();
   HAL_ADCEx_DisableInjectedQueue(h);
 }
 
@@ -81,7 +87,13 @@ static void adc_injected(ADC_HandleTypeDef *h, uint32_t channel, uint32_t trig)
 
   c.InjectedChannel = channel;
   c.InjectedRank = ADC_INJECTED_RANK_1;
-  c.InjectedSamplingTime = ADC_SAMPLETIME_1CYCLE_5;
+  /* 8.5 ADC cycles = 170 ns @ 50 MHz. 1.5 cycles (30 ns) is too short for
+   * full 16-bit settling even from the DRV8316's buffered CSA output. The
+   * 8x-oversampled conversion train grows to ~2.7 µs, which still fits well
+   * inside the low-side window around the counter peak at FOC duty cycles
+   * (~50% → ±6.25 µs); only block mode near BLOCK_DUTY_MAX clips the tail,
+   * and those samples feed only the OC backstop/telemetry. */
+  c.InjectedSamplingTime = ADC_SAMPLETIME_8CYCLES_5;
   c.InjectedSingleDiff = ADC_SINGLE_ENDED;
   c.InjectedOffsetNumber = ADC_OFFSET_NONE;
   c.InjectedNbrOfConversion = 1;
