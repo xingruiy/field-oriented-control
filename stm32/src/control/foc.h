@@ -119,6 +119,12 @@ bool  foc_tune_speed(float omega_ref, char *report, size_t n);
 bool  foc_oc_tripped(void);
 void  foc_clear_oc_trip(void);
 
+/* Invalid-Hall-code backstop. While FOC / block / rotor-voltage mode is
+ * driving, a Hall code of 0b000/0b111 persisting HALL_INVALID_TRIP_TICKS
+ * kills the bridge and latches hall_trip; fault_poll() surfaces it. */
+bool  foc_hall_tripped(void);
+void  foc_clear_hall_trip(void);
+
 /* State accessors for CLI diagnostics */
 bool  foc_is_enabled(void);
 float foc_get_iq_ref(void);      /* live (slew-ramped) reference */

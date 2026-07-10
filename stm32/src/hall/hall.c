@@ -35,6 +35,10 @@ static uint8_t s_next_cw[8]  = { 0, 5, 3, 1, 6, 4, 2, 0 };
                                        * / (PSC+1=2000) = 100 kHz. See README §5) */
 #define HALL_MIN_PERIOD     5u        /* ticks (50 µs) — reject contact bounce  */
 #define HALL_STALE_MS       100u
+/* Plausible per-edge arc (calibrated boundary-to-boundary width). Outside this
+ * band the edge speed falls back to the nominal π/3 sector. */
+#define HALL_ARC_MIN_RAD    0.35f     /* ~20°  */
+#define HALL_ARC_MAX_RAD    1.75f     /* ~100° */
 
 static volatile float    s_angle_offset = HALL_ANGLE_OFFSET_RAD;
 static volatile uint8_t  s_state;
@@ -68,7 +72,8 @@ static volatile uint32_t s_glitch_edges;
 /* Per-edge innovation: wrap_pi(θ̂ − boundary) just before the hard snap — the
  * θ̂ interpolation error accumulated since the previous edge. Small at a clean
  * steady spin; one huge value = glitch ω̂ snap; a repeating per-sector pattern
- * = the 60°/edge speed bias on unequal sectors. Keyed by the sector entered. */
+ * = residual sector-width error (edge speed uses the calibrated boundary arc,
+ * so this should stay small after hcal). Keyed by the sector entered. */
 static volatile float    s_innov_last, s_innov_max;   /* rad; max keeps sign  */
 static volatile float    s_innov_by_sector[8];
 static volatile uint32_t s_innov_count;
@@ -100,9 +105,15 @@ static inline float circ_midpoint(float a, float b)
 
 static inline int hall_is_stale(void);
 
+/* Live 3-bit Hall code straight from the pins (no edge/ISR latency). */
+uint8_t hall_state_now(void)
+{
+    return (uint8_t)((GPIOD->IDR >> 12) & 0x7u);
+}
+
 void hall_init(void)
 {
-    uint8_t state   = (uint8_t)((GPIOD->IDR >> 12) & 0x7u);
+    uint8_t state   = hall_state_now();
     s_state         = state;
     s_sector        = state;
     s_last_edge_ms  = HAL_GetTick();
@@ -128,7 +139,7 @@ void hall_update(void)
 {
     /* Reset mode: CCR1 already holds the period (ticks) since the previous edge. */
     uint16_t period = (uint16_t)TIM4->CCR1;
-    uint8_t  state  = (uint8_t)((GPIOD->IDR >> 12) & 0x7u);
+    uint8_t  state  = hall_state_now();
     bool     was_stale = hall_is_stale();
 
     if (!was_stale && period < HALL_MIN_PERIOD) return;
@@ -153,15 +164,24 @@ void hall_update(void)
      * handler (priority 5) and read these fields via hall_get_theta_e(). Guard
      * the stores so it never sees a new sector paired with a stale ω.          */
     uint32_t now = HAL_GetTick();
+    uint8_t old_sector = s_sector;
     float omega = s_omega_e;
     if (edir != 0 && !was_stale) {
-        /* ω_e [rad/s] = 2π / (6 edges/rev × period[s]), signed by θe direction */
-        omega = (float)edir * M_TWOPI_F / (6.0f * (float)period * HALL_TICK_S);
+        /* ω_e = (arc traversed)/period. The arc is the calibrated angle between
+         * the boundary just crossed and the previous one — NOT a fixed 2π/6:
+         * hcal exists precisely because this motor's sectors are unequal, and
+         * assuming 60° would bias each edge's speed by (true width)/60°,
+         * feeding a per-sector ripple into ω̂ (visible in innov_by_sector).
+         * Fall back to π/3 when the arc is implausible: same-boundary recross
+         * after a direction reversal (arc ≈ 0), first edge after boot, or a
+         * skipped edge. */
+        float arc = fabsf(wrap_pi(s_boundary[old_sector][state] - s_edge_theta));
+        if (arc < HALL_ARC_MIN_RAD || arc > HALL_ARC_MAX_RAD)
+            arc = M_PI_OVER_3_F;
+        omega = (float)edir * arc / ((float)period * HALL_TICK_S);
     } else if (edir != 0) {
         omega = 0.0f;
     }
-
-    uint8_t old_sector = s_sector;
 
     __disable_irq();
     s_state        = state;
@@ -307,7 +327,7 @@ static const char *hcal_sweep(int dir, HcalAccum *acc)
     foc_force_set_angle(dir > 0 ? 0.0f : M_TWOPI_F);
     HAL_Delay(HCAL_ALIGN_MS);
 
-    uint8_t prev = (uint8_t)((GPIOD->IDR >> 12) & 0x7u);
+    uint8_t prev = hall_state_now();
 
     for (uint32_t i = 0; i < HCAL_N_STEPS; i++) {
         float frac  = (float)i / (float)HCAL_N_STEPS;
@@ -321,7 +341,7 @@ static const char *hcal_sweep(int dir, HcalAccum *acc)
             fabsf(foc_get_ib()) > MOTOR_OC_TRIP_A ||
             fabsf(foc_get_ic()) > MOTOR_OC_TRIP_A) return "overcurrent";
 
-        uint8_t state = (uint8_t)((GPIOD->IDR >> 12) & 0x7u);
+        uint8_t state = hall_state_now();
         if (state == 0u || state == 7u) continue;   /* invalid Hall code */
 
         acc->sum_sin[state] += sinf(theta);
@@ -488,7 +508,7 @@ static const char *hchk_sweep(int pass, int dir, HchkAccum *a)
             fabsf(foc_get_ib()) > MOTOR_OC_TRIP_A ||
             fabsf(foc_get_ic()) > MOTOR_OC_TRIP_A) return "overcurrent";
 
-        uint8_t state = (uint8_t)((GPIOD->IDR >> 12) & 0x7u);
+        uint8_t state = hall_state_now();
         if (state == 0u || state == 7u) continue;
 
         float err = wrap_pi(hall_get_theta_e() - theta);

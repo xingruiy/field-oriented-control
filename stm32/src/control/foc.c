@@ -27,6 +27,8 @@ typedef struct {
     volatile float id, iq;        /* last rotating-frame currents */
     volatile bool  enabled;
     volatile bool  oc_trip;       /* software overcurrent backstop latched     */
+    volatile bool  hall_trip;     /* invalid Hall code (0/7) latched           */
+    uint8_t        hall_bad;      /* consecutive ticks with an invalid code    */
     volatile bool  speed_mode;    /* outer speed loop drives iq_ref           */
     volatile float omega_ref;     /* active (ramped) speed ref (elec rad/s)   */
     volatile float omega_target;  /* slew target for omega_ref                */
@@ -107,9 +109,22 @@ static void set_neutral_duty(void)
 
 static float clamp_voltage(float v)
 {
-    if (v >  PID_VOUT_MAX_V) return  PID_VOUT_MAX_V;
-    if (v < -PID_VOUT_MAX_V) return -PID_VOUT_MAX_V;
+    if (v >  VDQ_MAX_V) return  VDQ_MAX_V;
+    if (v < -VDQ_MAX_V) return -VDQ_MAX_V;
     return v;
+}
+
+/* Clamp the dq voltage vector inside the linear SVM circle (|v| ≤ VDQ_MAX_V),
+ * d-axis first: vd keeps the full budget, vq gets the remainder. Used by the
+ * open-loop drive paths; the closed current loop enforces the same circle
+ * through the PI output limits so anti-windup stays truthful. */
+static void limit_vdq_circle(float *vd, float *vq)
+{
+    float d = clamp_voltage(*vd);
+    float q_max = sqrtf(VDQ_MAX_V * VDQ_MAX_V - d * d);
+    if (*vq >  q_max) *vq =  q_max;
+    if (*vq < -q_max) *vq = -q_max;
+    *vd = d;
 }
 
 static bool calibrate_offsets(void)
@@ -174,8 +189,8 @@ void foc_init(void)
     s.block_ramp = 0.0f;
     s.block_dir  = +1;
 
-    pid_init(&s.pid_d, PID_D_KP, PID_D_KI, -PID_VOUT_MAX_V, PID_VOUT_MAX_V);
-    pid_init(&s.pid_q, PID_Q_KP, PID_Q_KI, -PID_VOUT_MAX_V, PID_VOUT_MAX_V);
+    pid_init(&s.pid_d, PID_D_KP, PID_D_KI, -VDQ_MAX_V, VDQ_MAX_V);
+    pid_init(&s.pid_q, PID_Q_KP, PID_Q_KI, -VDQ_MAX_V, VDQ_MAX_V);
     pid_init(&s.pid_speed, SPEED_KP, SPEED_KI,
              -MOTOR_CURRENT_LIMIT_A, MOTOR_CURRENT_LIMIT_A);
 
@@ -404,6 +419,8 @@ bool  foc_is_rotor_voltage_mode(void) { return s.rotor_v_mode; }
 bool  foc_is_enabled(void)   { return s.enabled; }
 bool  foc_oc_tripped(void)   { return s.oc_trip; }
 void  foc_clear_oc_trip(void){ s.oc_trip = false; }
+bool  foc_hall_tripped(void)    { return s.hall_trip; }
+void  foc_clear_hall_trip(void) { s.hall_trip = false; s.hall_bad = 0; }
 float foc_get_iq_ref(void)   { return s.iq_ref; }
 float foc_get_iq_target(void){ return s.iq_target; }
 #if FOC_DEBUG_ENABLE
@@ -485,14 +502,18 @@ bool foc_tune_current(char *report, size_t n)
     foc_force_end();
 
     /* Fit τ = Ls/Rs using the measured settled current as the asymptote, so the
-     * result is independent of voltage / dead-time scaling: i(t)=Iss(1-e^-t/τ). */
+     * result is independent of voltage / dead-time scaling: i(t)=Iss(1-e^-t/τ).
+     * Sample k has only seen (k − TUNE_LS_DELAY_TICKS)·Ts of drive (CCR preload
+     * + trigger position), so use that as the time base or τ comes out ~30%
+     * high with τ ≈ 4 ticks. */
     float i_ss = 0.25f * (s.ls_buf[TUNE_LS_CAP_N-1] + s.ls_buf[TUNE_LS_CAP_N-2]
                         + s.ls_buf[TUNE_LS_CAP_N-3] + s.ls_buf[TUNE_LS_CAP_N-4]);
     float tau_sum = 0.0f; uint32_t tau_n = 0;
     for (uint8_t k = 1; k < TUNE_LS_CAP_N; k++) {
+        float t = ((float)k - TUNE_LS_DELAY_TICKS) * PWM_DT_S;
         float r = (i_ss > 1.0e-3f) ? (s.ls_buf[k] / i_ss) : 0.0f;
-        if (r > 0.1f && r < 0.85f) {        /* the well-conditioned part of the rise */
-            tau_sum += -((float)k * PWM_DT_S) / logf(1.0f - r);
+        if (t > 0.0f && r > 0.1f && r < 0.85f) {   /* well-conditioned part of the rise */
+            tau_sum += -t / logf(1.0f - r);
             tau_n++;
         }
     }
@@ -693,6 +714,31 @@ static void foc_current_loop(void)
         return;
     }
 
+    /* Invalid Hall code supervision. A disconnected cable reads 0b111 (pull-
+     * ups) and a short reads 0b000; both would otherwise feed a fabricated
+     * angle (FOC/rotor modes) or the {0,0} filler table entry (block mode)
+     * into the drive. Sensor skew during a normal edge can pass through 0/7
+     * for a few µs, so require the code to persist before tripping. Force
+     * mode is exempt — it does not consume the Hall angle. */
+    {
+        uint8_t hst = hall_state_now();
+        if (hst == 0u || hst == 7u) {
+            if (s.hall_bad < 0xFFu) s.hall_bad++;
+        } else {
+            s.hall_bad = 0;
+        }
+        if (s.hall_bad >= HALL_INVALID_TRIP_TICKS &&
+            (s.enabled || s.block_mode
+#if FOC_DEBUG_ENABLE
+             || s.rotor_v_mode
+#endif
+            )) {
+            foc_emergency_stop();
+            s.hall_trip = true;
+            return;
+        }
+    }
+
     /* 6-step block commutation with soft ramp */
     if (s.block_mode) {
         float ramp = s.block_ramp;
@@ -709,6 +755,14 @@ static void foc_current_loop(void)
         uint8_t st = hall_get_sector();       /* 0..7, valid 1..6 */
         uint8_t hi = s_block_hi[st];
         uint8_t lo = s_block_lo[st];
+
+        /* Invalid Hall code (filler {0,0} entry): hold all phases at 50%
+         * (zero line-line volts) until the supervision above latches the
+         * trip, instead of half-driving phase A. */
+        if (hi == lo) {
+            set_neutral_duty();
+            return;
+        }
 
         if (s.block_dir < 0) { uint8_t tmp = hi; hi = lo; lo = tmp; }
 
@@ -731,12 +785,14 @@ static void foc_current_loop(void)
     /* Open-loop forced-angle drive (Hall calibration / Rs-Ls autotune): apply a
      * stationary voltage vector at the commanded angle, bypassing the PI loop. */
     if (s.force_mode) {
+        float theta = s.force_theta;
+        float st = sinf(theta), ct = cosf(theta);
         /* Compute id/iq so CLI diagnostics (idq/status) read live values */
         {
             float al, be;
             float id, iq;
             foc_clarke(ia, ib, ic, &al, &be);
-            foc_park(al, be, s.force_theta, &id, &iq);
+            foc_park_sc(al, be, st, ct, &id, &iq);
             s.id = id;
             s.iq = iq;
         }
@@ -749,13 +805,16 @@ static void foc_current_loop(void)
             s.ls_buf[s.ls_idx++] = s.id;
             vd = s.ls_vstep;
         }
+#endif
+        limit_vdq_circle(&vd, &vq);
+#if FOC_DEBUG_ENABLE
         s.vd_cmd = vd;
         s.vq_cmd = vq;
 #endif
         float va, vb;
         uint16_t c1, c2, c3;
-        foc_inv_park(vd, vq, s.force_theta, &va, &vb);
-        foc_svm(va, vb, VBUS_V, &c1, &c2, &c3);
+        foc_inv_park_sc(vd, vq, st, ct, &va, &vb);
+        foc_svm(va, vb, VBUS_V, ia, ib, ic, &c1, &c2, &c3);
         TIM1->CCR1 = c1; TIM1->CCR2 = c2; TIM1->CCR3 = c3;
         return;
     }
@@ -766,17 +825,21 @@ static void foc_current_loop(void)
         foc_clarke(ia, ib, ic, &ialpha, &ibeta);
 
         float theta_e = hall_get_theta_e();
+        float st = sinf(theta_e), ct = cosf(theta_e);
         float id, iq;
-        foc_park(ialpha, ibeta, theta_e, &id, &iq);
+        foc_park_sc(ialpha, ibeta, st, ct, &id, &iq);
         s.id = id;
         s.iq = iq;
 
+        float vd = s.rotor_vd;
+        float vq = s.rotor_vq;
+        limit_vdq_circle(&vd, &vq);
         float valpha, vbeta;
         uint16_t c1, c2, c3;
-        s.vd_cmd = s.rotor_vd;
-        s.vq_cmd = s.rotor_vq;
-        foc_inv_park(s.rotor_vd, s.rotor_vq, theta_e, &valpha, &vbeta);
-        foc_svm(valpha, vbeta, VBUS_V, &c1, &c2, &c3);
+        s.vd_cmd = vd;
+        s.vq_cmd = vq;
+        foc_inv_park_sc(vd, vq, st, ct, &valpha, &vbeta);
+        foc_svm(valpha, vbeta, VBUS_V, ia, ib, ic, &c1, &c2, &c3);
         TIM1->CCR1 = c1; TIM1->CCR2 = c2; TIM1->CCR3 = c3;
         return;
     }
@@ -809,34 +872,43 @@ static void foc_current_loop(void)
         s.iq_ref = slew_toward(s.iq_ref, s.iq_target,
                                IQ_REF_SLEW_A_PER_S * PWM_DT_S);
 
-    /* 2. Clarke → αβ, Park → dq */
+    /* 2. Clarke → αβ, Park → dq (sin/cos computed once, shared with the
+     * inverse Park below) */
     float ialpha, ibeta;
     foc_clarke(ia, ib, ic, &ialpha, &ibeta);
 
     float theta_e = hall_get_theta_e();
+    float sin_t = sinf(theta_e), cos_t = cosf(theta_e);
     float id_meas, iq_meas;
-    foc_park(ialpha, ibeta, theta_e, &id_meas, &iq_meas);
+    foc_park_sc(ialpha, ibeta, sin_t, cos_t, &id_meas, &iq_meas);
 
     s.id = id_meas;
     s.iq = iq_meas;
 
-    /* 4. PI outputs + back-EMF feedforward / cross-coupling decoupling.
-     * Recover θe-frame speed (hall_get_omega_e() returns physical-frame). */
-    // float omega_e = (float)HALL_PHYS_DIR_SIGN * hall_get_omega_e();
-    float vd = pid_update(&s.pid_d, -id_meas, PWM_DT_S); //- omega_e * MOTOR_LS_H * iq_meas;
-    float vq = pid_update(&s.pid_q, s.iq_ref - iq_meas, PWM_DT_S); // + omega_e * MOTOR_KE_V_S_RAD;
+    /* 3. PI outputs, d-axis first. The q-axis output clamp is retargeted every
+     * tick to the remainder of the voltage circle (√(V²−vd²)), so the combined
+     * vector never leaves the linear SVM range and the back-calculation
+     * anti-windup inside pid_update() sees the true applied limit — no hidden
+     * windup while saturated.
+     * (Back-EMF feedforward / cross-coupling decoupling intentionally off;
+     * recover θe-frame speed via HALL_PHYS_DIR_SIGN·hall_get_omega_e() if
+     * re-enabling: vd −= ωe·Ls·iq, vq += ωe·Ke.) */
+    float vd = pid_update(&s.pid_d, -id_meas, PWM_DT_S);
+    float vq_max = sqrtf(VDQ_MAX_V * VDQ_MAX_V - vd * vd);
+    pid_set_output_limits(&s.pid_q, -vq_max, vq_max);
+    float vq = pid_update(&s.pid_q, s.iq_ref - iq_meas, PWM_DT_S);
 #if FOC_DEBUG_ENABLE
     s.vd_cmd = vd;
     s.vq_cmd = vq;
 #endif
 
-    /* 3. Inverse Park → αβ */
+    /* 4. Inverse Park → αβ */
     float valpha, vbeta;
-    foc_inv_park(vd, vq, theta_e, &valpha, &vbeta);
+    foc_inv_park_sc(vd, vq, sin_t, cos_t, &valpha, &vbeta);
 
-    /* 4. SVM → CCR values */
+    /* 5. SVM (with dead-time compensation) → CCR values */
     uint16_t ccr1, ccr2, ccr3;
-    foc_svm(valpha, vbeta, VBUS_V, &ccr1, &ccr2, &ccr3);
+    foc_svm(valpha, vbeta, VBUS_V, ia, ib, ic, &ccr1, &ccr2, &ccr3);
 
     /* Write to timer registers */
     if (s.enabled) {

@@ -25,3 +25,7 @@
 
 void can_init(void);
 void can_poll(void);
+
+/* Disarm the CAN dead-man (CAN_CMD_TIMEOUT_MS): a local CLI iq/spd command
+ * takes ownership of the motion setpoint away from the CAN host. */
+void can_motion_release(void);

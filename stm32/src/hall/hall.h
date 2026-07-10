@@ -7,12 +7,14 @@
 /* Hall sensor state machine and electrical angle / speed estimation.
  *
  * Hardware:  TIM4 Hall sensor interface (slave RESET) mode, 100 kHz timebase
- *            (prescaler 999, set in hall_init). The counter resets on every Hall
- *            edge: CCR1 = inter-edge period (ticks), CNT = ticks since last edge.
+ *            (200 MHz kernel / (PSC 1999 + 1), set in bsp_tim4_init). The
+ *            counter resets on every Hall edge: CCR1 = inter-edge period
+ *            (ticks), CNT = ticks since last edge.
  *            PD12=HA, PD13=HB, PD14=HC — read directly from GPIOD.
  *
  * Motor:     1 pole pair → θ_electrical = θ_mechanical.
- *            6 Hall edges per revolution; each sector = 60° electrical. */
+ *            6 Hall edges per revolution; each sector ≈ 60° electrical
+ *            (true widths are calibrated by hcal). */
 
 void    hall_init(void);
 
@@ -32,10 +34,14 @@ float   hall_get_theta_e(void);
  * (CLI speed readouts show the magnitude and report direction separately.) */
 float   hall_get_omega_e(void);
 
-/* Current Hall 3-bit state (PB6..8) for CLI diagnostics. */
+/* Hall 3-bit code (PD12..14) as latched on the last edge, for CLI diagnostics. */
 uint8_t hall_get_state(void);
 
-/* Current sector index 0–5. */
+/* Live 3-bit Hall code read straight from the pins (no edge/ISR latency).
+ * Valid codes are 1..6; 0/7 mean a disconnected or shorted sensor line. */
+uint8_t hall_state_now(void);
+
+/* Current sector = the Hall code (1..6) latched on the last edge. */
 uint8_t hall_get_sector(void);
 
 /* Last detected rotation direction: +1=CCW, -1=CW, 0=unknown/stopped. */

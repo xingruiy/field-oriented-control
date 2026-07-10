@@ -5,6 +5,7 @@
 #include "fault/fault.h"
 #include "encoder/encoder.h"
 #include "arm/arm_pos.h"
+#include "cli/cli.h"
 #include "common/settings.h"
 #include "main.h"
 #include <math.h>
@@ -12,6 +13,11 @@
 extern FDCAN_HandleTypeDef hfdcan1;
 
 static uint32_t s_can_restarts;
+
+/* Dead-man state (see CAN_CMD_TIMEOUT_MS): armed while the last motion
+ * setpoint (iq/speed) came over CAN; any received control frame feeds it. */
+static uint32_t s_last_ctrl_ms;
+static bool     s_can_motion;
 
 /* ------------------------------------------------------------------ */
 /* Pack / transmit helpers                                             */
@@ -118,13 +124,16 @@ static void can_dispatch(uint32_t id, const uint8_t *d)
 {
     int16_t v = (int16_t)((uint16_t)d[0] | ((uint16_t)d[1] << 8));
 
+    s_last_ctrl_ms = HAL_GetTick();          /* any control frame feeds the dead-man */
+
     switch (id) {
     case CAN_ID_CMD:
         switch (d[0]) {
-        case CAN_OP_DISABLE:     arm_pos_stop(); foc_disable();     break;
+        case CAN_OP_DISABLE:     arm_pos_stop(); foc_disable(); s_can_motion = false; break;
         case CAN_OP_ENABLE:      if (!fault_is_active()) foc_enable(); break;
         case CAN_OP_CLEAR_FAULT: fault_clear();                     break;
-        case CAN_OP_SPEED_OFF:   arm_pos_stop(); foc_speed_disable(); foc_set_iq_ref(0.0f); break;
+        case CAN_OP_SPEED_OFF:   arm_pos_stop(); foc_speed_disable(); foc_set_iq_ref(0.0f);
+                                 s_can_motion = false;              break;
         case CAN_OP_CAL_ADC:     can_run_cal_adc();                 break;
         case CAN_OP_HCAL:        can_run_hcal();                    break;
         case CAN_OP_ARM_OFF:     arm_pos_stop();                    break;
@@ -133,17 +142,26 @@ static void can_dispatch(uint32_t id, const uint8_t *d)
     case CAN_ID_SET_IQ:
         arm_pos_stop();
         foc_set_iq_ref((float)v / CAN_CURRENT_SCALE);
+        s_can_motion = true;
         break;
     case CAN_ID_SET_SPEED:
         if (!fault_is_active()) {
             arm_pos_stop();
             foc_set_speed_ref(RPM_TO_OMEGA_E((float)v));
+            s_can_motion = true;
         }
         break;
     case CAN_ID_SET_ARM_POS:
+        /* Arm supervisor runs autonomously — not subject to the dead-man. */
         arm_pos_set_target_deg((float)get32(d) / ARM_POS_CMD_SCALE);
+        s_can_motion = false;
         break;
     }
+}
+
+void can_motion_release(void)
+{
+    s_can_motion = false;                    /* local (CLI) command took ownership */
 }
 
 /* ------------------------------------------------------------------ */
@@ -236,6 +254,15 @@ void can_poll(void)
         if (HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &rx, d) != HAL_OK)
             break;
         can_dispatch(rx.Identifier, d);
+    }
+
+    /* Dead-man: the host that commanded motion has gone silent — do not keep
+     * spinning at its last setpoint. Disabled when CAN_CMD_TIMEOUT_MS is 0. */
+    if (CAN_CMD_TIMEOUT_MS != 0U && s_can_motion && foc_is_enabled() &&
+        (HAL_GetTick() - s_last_ctrl_ms) > CAN_CMD_TIMEOUT_MS) {
+        s_can_motion = false;
+        foc_disable();
+        cli_print("\r\n[warn] CAN command timeout — FOC disabled\r\n> ");
     }
 
     /* Broadcast telemetry at CAN_TLM_PERIOD_MS. */

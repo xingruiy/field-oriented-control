@@ -12,6 +12,7 @@
 #endif
 #include "encoder/encoder.h"
 #include "arm/arm_pos.h"
+#include "can/can.h"
 #include "main.h"
 #include <string.h>
 #include <stdlib.h>
@@ -295,6 +296,7 @@ static void cmd_iq(const char *arg)
         return;
     }
     arm_pos_stop();
+    can_motion_release();
     float val = strtof(arg, NULL);
     foc_set_iq_ref(val);
     cli_printf("  iq_ref target set to %.4f A (slew-limited)\r\n",
@@ -312,6 +314,7 @@ static void cmd_spd(const char *arg)
     }
     if (!strcmp(arg, "off")) {
         arm_pos_stop();
+        can_motion_release();
         foc_speed_disable();
         foc_set_iq_ref(0.0f);
         cli_print("  speed mode off (manual, iq=0)\r\n");
@@ -322,6 +325,7 @@ static void cmd_spd(const char *arg)
         return;
     }
     arm_pos_stop();
+    can_motion_release();
     float rpm = strtof(arg, NULL);
     foc_set_speed_ref(RPM_TO_OMEGA_E(rpm));
     cli_printf("  spd_ref set to %.1f RPM%s\r\n", rpm,
